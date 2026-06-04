@@ -1,0 +1,140 @@
+"""
+Entry point for the RingCentral DND scheduler (run as a Render Cron Job).
+
+On each run it:
+  1. authenticates with RingCentral (JWT flow)
+  2. lists enabled user extensions
+  3. reads each extension's business-hours + current presence
+  4. sets dndStatus to the desired value ONLY if it differs
+
+Configuration is via environment variables (see .env.example).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from ringcentral_client import RingCentralClient, RingCentralError
+from scheduler import resolve_timezone, is_within_business_hours
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)-7s %(message)s",
+)
+log = logging.getLogger("main")
+
+
+def _required(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        log.error("Missing required environment variable: %s", name)
+        sys.exit(2)
+    return value
+
+
+def main() -> int:
+    server_url = os.getenv("RC_SERVER_URL", "https://platform.ringcentral.com")
+    client_id = _required("RC_CLIENT_ID")
+    client_secret = _required("RC_CLIENT_SECRET")
+    jwt_assertion = _required("RC_JWT")
+
+    # DND value to set when an agent is OUTSIDE their business hours.
+    #   DoNotAcceptAnyCalls        -> full DND (blocks everything)
+    #   DoNotAcceptDepartmentCalls -> only blocks call-queue/department calls
+    dnd_when_closed = os.getenv("DND_WHEN_CLOSED", "DoNotAcceptAnyCalls")
+    # DND value to set when INSIDE business hours.
+    dnd_when_open = os.getenv("DND_WHEN_OPEN", "TakeAllCalls")
+
+    default_tz = os.getenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
+    dry_run = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+    # Optional: limit to a comma-separated allowlist of extension IDs for testing.
+    only_ids = {
+        x.strip() for x in os.getenv("ONLY_EXTENSION_IDS", "").split(",") if x.strip()
+    }
+    pace_seconds = float(os.getenv("PACE_SECONDS", "0.2"))
+
+    try:
+        ZoneInfo(default_tz)
+    except Exception:  # noqa: BLE001
+        log.error("DEFAULT_TIMEZONE %r is not a valid IANA timezone.", default_tz)
+        return 2
+
+    client = RingCentralClient(server_url, client_id, client_secret, jwt_assertion)
+    try:
+        client.authenticate()
+    except RingCentralError as exc:
+        log.error("Could not authenticate: %s", exc)
+        return 1
+
+    checked = changed = errors = skipped = 0
+
+    for ext in client.iter_user_extensions():
+        ext_id = str(ext.get("id"))
+        name = ext.get("name") or ext.get("contact", {}).get("firstName") or ext_id
+
+        if only_ids and ext_id not in only_ids:
+            continue
+
+        checked += 1
+        try:
+            # Timezone comes from the extension's regionalSettings, not from
+            # business-hours. Use the list record if it already carries it;
+            # otherwise fetch the full extension detail.
+            tz_obj = (ext.get("regionalSettings") or {}).get("timezone")
+            if not tz_obj:
+                detail = client.get_extension(ext_id)
+                tz_obj = (detail.get("regionalSettings") or {}).get("timezone")
+            tz, tz_label = resolve_timezone(tz_obj, default_tz)
+            now_local = datetime.now(tz)
+
+            business_hours = client.get_business_hours(ext_id)
+            within, reason = is_within_business_hours(business_hours, now_local)
+            desired = dnd_when_open if within else dnd_when_closed
+
+            presence = client.get_presence(ext_id)
+            current = presence.get("dndStatus")
+
+            if current == desired:
+                skipped += 1
+                log.info(
+                    "[%s] %s: already %s (%s, %s; tz=%s)",
+                    ext_id, name, desired, "open" if within else "closed",
+                    reason, tz_label,
+                )
+                continue
+
+            if dry_run:
+                log.info(
+                    "[%s] %s: WOULD set %s -> %s (%s, %s; tz=%s) [dry-run]",
+                    ext_id, name, current, desired,
+                    "open" if within else "closed", reason, tz_label,
+                )
+            else:
+                client.set_dnd_status(ext_id, desired)
+                changed += 1
+                log.info(
+                    "[%s] %s: set %s -> %s (%s, %s; tz=%s)",
+                    ext_id, name, current, desired,
+                    "open" if within else "closed", reason, tz_label,
+                )
+        except RingCentralError as exc:
+            errors += 1
+            log.error("[%s] %s: error: %s", ext_id, name, exc)
+        finally:
+            if pace_seconds:
+                time.sleep(pace_seconds)
+
+    log.info(
+        "Done. checked=%d changed=%d unchanged=%d errors=%d%s",
+        checked, changed, skipped, errors, " [dry-run]" if dry_run else "",
+    )
+    return 1 if errors and changed == 0 else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

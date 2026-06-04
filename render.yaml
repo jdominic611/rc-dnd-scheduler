@@ -1,0 +1,36 @@
+# Render Blueprint — deploys this repo as a scheduled Cron Job.
+# Docs: https://render.com/docs/cronjobs and https://render.com/docs/blueprint-spec
+#
+# After connecting the repo in Render (New > Blueprint), Render reads this file.
+# Set the secret env vars (marked sync:false) in the Render dashboard or via a
+# secret file — do NOT commit real secrets.
+
+services:
+  - type: cron
+    name: rc-dnd-scheduler
+    runtime: python
+    plan: starter            # cron jobs require a paid instance type
+    # Run every 15 minutes. Adjust cadence to your desired flip precision.
+    # (cron expressions are interpreted in UTC on Render)
+    schedule: "*/15 * * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: RC_SERVER_URL
+        value: https://platform.ringcentral.com   # sandbox: https://platform.devtest.ringcentral.com
+      - key: RC_CLIENT_ID
+        sync: false
+      - key: RC_CLIENT_SECRET
+        sync: false
+      - key: RC_JWT
+        sync: false
+      - key: DEFAULT_TIMEZONE
+        value: America/Los_Angeles
+      - key: DND_WHEN_CLOSED
+        value: DoNotAcceptAnyCalls
+      - key: DND_WHEN_OPEN
+        value: TakeAllCalls
+      - key: DRY_RUN
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
