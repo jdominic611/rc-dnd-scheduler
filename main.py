@@ -43,11 +43,20 @@ def main() -> int:
     client_secret = _required("RC_CLIENT_SECRET")
     jwt_assertion = _required("RC_JWT")
 
-    # DND value to set when an agent is OUTSIDE their business hours.
+    # DND value to set when an agent is OUTSIDE their work hours.
     #   DoNotAcceptAnyCalls        -> full DND (blocks everything)
     #   DoNotAcceptDepartmentCalls -> only blocks call-queue/department calls
     dnd_when_closed = os.getenv("DND_WHEN_CLOSED", "DoNotAcceptAnyCalls")
-    # DND value to set when INSIDE business hours.
+
+    # SAFETY: by default the job NEVER forces an agent available during work
+    # hours. It only ever *adds* DND (off-hours); going available must be an
+    # agent-asserted action (their morning login). This prevents a scheduled-
+    # but-absent agent from being marked available on an empty seat.
+    # Set CLEAR_DND_IN_HOURS=true ONLY if you explicitly want the old behavior
+    # of forcing everyone available during their hours.
+    clear_dnd_in_hours = os.getenv("CLEAR_DND_IN_HOURS", "false").lower() in (
+        "1", "true", "yes",
+    )
     dnd_when_open = os.getenv("DND_WHEN_OPEN", "TakeAllCalls")
 
     default_tz = os.getenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
@@ -71,7 +80,7 @@ def main() -> int:
         log.error("Could not authenticate: %s", exc)
         return 1
 
-    checked = changed = errors = skipped = 0
+    checked = changed = errors = skipped = left_alone = 0
 
     for ext in client.iter_user_extensions():
         ext_id = str(ext.get("id"))
@@ -83,7 +92,7 @@ def main() -> int:
         checked += 1
         try:
             # Timezone comes from the extension's regionalSettings, not from
-            # business-hours. Use the list record if it already carries it;
+            # the work-hours rule. Use the list record if it carries it;
             # otherwise fetch the full extension detail.
             tz_obj = (ext.get("regionalSettings") or {}).get("timezone")
             if not tz_obj:
@@ -92,8 +101,21 @@ def main() -> int:
             tz, tz_label = resolve_timezone(tz_obj, default_tz)
             now_local = datetime.now(tz)
 
-            business_hours = client.get_work_hours_rule(ext_id)
-            within, reason = is_within_work_hours(business_hours, now_local)
+            work_hours = client.get_work_hours_rule(ext_id)
+            within, reason = is_within_work_hours(work_hours, now_local)
+
+            # DURING work hours: by default do nothing. The job never forces an
+            # agent available — going available is the agent's own action
+            # (morning login). This keeps a scheduled-but-absent agent closed,
+            # because nothing here opens their seat.
+            if within and not clear_dnd_in_hours:
+                left_alone += 1
+                log.info(
+                    "[%s] %s: within hours, not managed (open, %s; tz=%s)",
+                    ext_id, name, reason, tz_label,
+                )
+                continue
+
             desired = dnd_when_open if within else dnd_when_closed
 
             presence = client.get_presence(ext_id)
@@ -130,8 +152,9 @@ def main() -> int:
                 time.sleep(pace_seconds)
 
     log.info(
-        "Done. checked=%d changed=%d unchanged=%d errors=%d%s",
-        checked, changed, skipped, errors, " [dry-run]" if dry_run else "",
+        "Done. checked=%d changed=%d unchanged=%d in_hours_unmanaged=%d errors=%d%s",
+        checked, changed, skipped, left_alone, errors,
+        " [dry-run]" if dry_run else "",
     )
     return 1 if errors and changed == 0 else 0
 
