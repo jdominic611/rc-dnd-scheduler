@@ -144,10 +144,23 @@ class RingCentralClient:
                 break
             path, params = next_page, None  # nextPage uri already has query string
 
-    def get_business_hours(self, extension_id: str) -> Dict[str, Any]:
-        return self._request(
-            "GET", f"/restapi/v1.0/account/~/extension/{extension_id}/business-hours"
-        )
+    def get_work_hours_rule(self, extension_id: str) -> Dict[str, Any]:
+        """
+        Read the v2 'work-hours' state rule, which holds the weekly schedule on
+        accounts upgraded to NewCallHandlingAndForwarding. Returns {} if the
+        account/extension has no work-hours rule (treated as always open).
+        """
+        try:
+            return self._request(
+                "GET",
+                f"/restapi/v2/accounts/~/extensions/{extension_id}"
+                "/comm-handling/voice/state-rules/work-hours",
+            )
+        except RingCentralError as exc:
+            # 404 = no such rule (e.g. 24/7); surface empty rather than crash.
+            if " 404:" in str(exc):
+                return {}
+            raise
 
     def get_extension(self, extension_id: str) -> Dict[str, Any]:
         """Full extension record, including regionalSettings.timezone."""
