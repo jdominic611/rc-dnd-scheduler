@@ -20,7 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ringcentral_client import RingCentralClient, RingCentralError
-from scheduler import resolve_timezone, is_within_business_hours
+from scheduler import resolve_timezone, is_within_work_hours
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -56,7 +56,7 @@ def main() -> int:
     only_ids = {
         x.strip() for x in os.getenv("ONLY_EXTENSION_IDS", "").split(",") if x.strip()
     }
-    pace_seconds = float(os.getenv("PACE_SECONDS", "0.2"))
+    pace_seconds = float(os.getenv("PACE_SECONDS", "0.5"))
 
     try:
         ZoneInfo(default_tz)
@@ -92,8 +92,8 @@ def main() -> int:
             tz, tz_label = resolve_timezone(tz_obj, default_tz)
             now_local = datetime.now(tz)
 
-            business_hours = client.get_business_hours(ext_id)
-            within, reason = is_within_business_hours(business_hours, now_local)
+            business_hours = client.get_work_hours_rule(ext_id)
+            within, reason = is_within_work_hours(business_hours, now_local)
             desired = dnd_when_open if within else dnd_when_closed
 
             presence = client.get_presence(ext_id)
