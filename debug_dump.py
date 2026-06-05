@@ -80,12 +80,26 @@ def main() -> int:
         try:
             rules = client._request(
                 "GET",
-                f"/restapi/v1.0/account/~/extension/{ext_id}/answering-rule",
-                params={"view": "Detailed", "perPage": 100},
+                f"/restapi/v2/accounts/~/extensions/{ext_id}/comm-handling/voice/state-rules/work-hours",
             )
-            dump("answering-rule LIST (detailed) RAW", rules)
+            dump("v2 work-hours state-rule RAW", rules)
         except RingCentralError as e:
-            print(f"  answering-rule error: {e}")
+            print(f"  v2 work-hours error: {e}")
+
+        # Also list all state rules so we can see dnd / after-hours / agent
+        try:
+            allrules = client._request(
+                "GET",
+                f"/restapi/v2/accounts/~/extensions/{ext_id}/comm-handling/voice/state-rules",
+            )
+            dump("v2 state-rules LIST (names+ids only)", [
+                {"id": r.get("id"), "name": r.get("name"),
+                 "enabled": r.get("enabled"),
+                 "hasSchedule": bool(r.get("schedule"))}
+                for r in (allrules.get("records") or [])
+            ])
+        except RingCentralError as e:
+            print(f"  v2 state-rules list error: {e}")
 
         count += 1
         if not only and count >= 3:
