@@ -76,6 +76,17 @@ def main() -> int:
         except RingCentralError as e:
             print(f"  business-hours error: {e}")
 
+        # Answering rules (detailed) — likely where the real schedule lives
+        try:
+            rules = client._request(
+                "GET",
+                f"/restapi/v1.0/account/~/extension/{ext_id}/answering-rule",
+                params={"view": "Detailed", "perPage": 100},
+            )
+            dump("answering-rule LIST (detailed) RAW", rules)
+        except RingCentralError as e:
+            print(f"  answering-rule error: {e}")
+
         count += 1
         if not only and count >= 3:
             print("\n(stopping after 3 extensions to stay under rate limits)")
