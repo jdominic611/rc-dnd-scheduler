@@ -1,26 +1,40 @@
 """
 Decide whether a given extension should be in Do-Not-Disturb right now,
-based on its RingCentral business-hours schedule and its own timezone.
+based on its RingCentral Work Hours schedule and its own timezone.
 
-RingCentral business-hours payload shape (the bit we care about):
+This targets the NEW call-handling backend (NewCallHandlingAndForwarding).
+The schedule comes from the v2 'work-hours' state rule:
 
     {
-      "schedule": {
-        # Either a 24/7 marker ...
-        "weeklyRanges": {
-          "monday":    [{"from": "09:00", "to": "17:00"}],
-          "tuesday":   [{"from": "09:00", "to": "17:00"}],
-          ...
-        }
+      "id": "work-hours",
+      "state": {
+        "conditions": [
+          {
+            "type": "Schedule",
+            "schedule": {
+              "triggers": [
+                {
+                  "triggerType": "Weekly",
+                  "ranges": {
+                    "monday":  [{"startTime": "10:00:00", "endTime": "19:30:00"}],
+                    "tuesday": [{"startTime": "10:00:00", "endTime": "19:30:00"}],
+                    ...
+                  }
+                }
+              ]
+            }
+          }
+        ]
       }
     }
 
 Notes / edge cases handled:
-  * A day missing from weeklyRanges  -> closed all day (DND on).
-  * Empty `schedule` / empty `weeklyRanges` -> treated as "always open"
-    (RingCentral represents 24/7 as an empty schedule).
+  * No Weekly trigger / empty ranges / empty rule -> treated as "always open"
+    (24/7 schedules carry no weekly ranges).
+  * A day missing from ranges -> closed all day (DND on).
   * Multiple ranges per day are supported (e.g. split shift).
-  * A range whose `to` is "00:00" or <= `from` is treated as "until end of day".
+  * An endTime of "00:00:00" or <= startTime is treated as "until end of day".
+  * Times are HH:MM:SS; seconds are honoured.
 """
 
 from __future__ import annotations
@@ -40,12 +54,34 @@ _WEEKDAY_KEYS = [
 ]
 
 
-def _parse_hhmm(value: str) -> Optional[dtime]:
+def _parse_time(value: str) -> Optional[dtime]:
+    """Parse 'HH:MM:SS' or 'HH:MM' into a time object."""
     try:
-        hh, mm = value.strip().split(":")
-        return dtime(int(hh), int(mm))
-    except (ValueError, AttributeError):
+        parts = value.strip().split(":")
+        hh = int(parts[0])
+        mm = int(parts[1]) if len(parts) > 1 else 0
+        ss = int(parts[2]) if len(parts) > 2 else 0
+        return dtime(hh, mm, ss)
+    except (ValueError, AttributeError, IndexError):
         return None
+
+
+def _extract_weekly_ranges(work_hours_rule: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Pull the weekly `ranges` dict out of the v2 work-hours rule, or None if the
+    rule has no weekly schedule (i.e. 24/7 / always open).
+    """
+    state = work_hours_rule.get("state") or {}
+    for condition in state.get("conditions") or []:
+        if condition.get("type") != "Schedule":
+            continue
+        schedule = condition.get("schedule") or {}
+        for trigger in schedule.get("triggers") or []:
+            if trigger.get("triggerType") == "Weekly":
+                ranges = trigger.get("ranges")
+                if ranges:
+                    return ranges
+    return None
 
 
 def resolve_timezone(timezone_obj: Optional[Dict[str, Any]], default_tz: str):
@@ -95,21 +131,21 @@ def _ranges_for_day(weekly: Dict[str, Any], weekday_index: int) -> List[Dict[str
     return list(value)
 
 
-def is_within_business_hours(
-    business_hours: Dict[str, Any],
+def is_within_work_hours(
+    work_hours_rule: Dict[str, Any],
     now: datetime,
 ) -> Tuple[bool, str]:
     """
     Return (within_hours, human_reason).
 
     `now` must already be timezone-aware in the extension's local timezone.
+    Reads the v2 work-hours rule structure.
     """
-    schedule = business_hours.get("schedule") or {}
-    weekly = schedule.get("weeklyRanges")
+    weekly = _extract_weekly_ranges(work_hours_rule)
 
-    # RingCentral encodes 24/7 availability as an empty / absent schedule.
+    # No weekly schedule -> 24/7 / always open.
     if not weekly:
-        return True, "no weekly schedule set (treated as always open)"
+        return True, "no work-hours schedule (treated as always open)"
 
     ranges = _ranges_for_day(weekly, now.weekday())
     if not ranges:
@@ -117,16 +153,16 @@ def is_within_business_hours(
 
     current = now.time()
     for r in ranges:
-        start = _parse_hhmm(r.get("from", ""))
-        end = _parse_hhmm(r.get("to", ""))
+        start = _parse_time(r.get("startTime", ""))
+        end = _parse_time(r.get("endTime", ""))
         if start is None:
             continue
-        # "to" of 00:00 or not-after start means "through end of day".
+        # endTime of 00:00:00 or not-after start means "through end of day".
         if end is None or end <= start:
             if current >= start:
-                return True, f"within {r.get('from')}–end of day"
+                return True, f"within {r.get('startTime')}–end of day"
         else:
             if start <= current < end:
-                return True, f"within {r.get('from')}–{r.get('to')}"
+                return True, f"within {r.get('startTime')}–{r.get('endTime')}"
 
     return False, "outside all working ranges for today"
