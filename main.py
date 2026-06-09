@@ -59,6 +59,14 @@ def main() -> int:
     )
     dnd_when_open = os.getenv("DND_WHEN_OPEN", "TakeAllCalls")
 
+    # During work hours, if an agent's presence is Offline, set them to DND so
+    # RingCentral stops routing calls to an unreachable seat. This is safe (it
+    # only closes a seat, never opens one). It does NOT touch agents who are
+    # Available, on a call, or already DND. Default off; enable explicitly.
+    dnd_offline_in_hours = os.getenv("DND_OFFLINE_IN_HOURS", "false").lower() in (
+        "1", "true", "yes",
+    )
+
     default_tz = os.getenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
     dry_run = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
     # Optional: limit to a comma-separated allowlist of extension IDs for testing.
@@ -108,12 +116,57 @@ def main() -> int:
             # agent available — going available is the agent's own action
             # (morning login). This keeps a scheduled-but-absent agent closed,
             # because nothing here opens their seat.
+            #
+            # EXCEPTION (DND_OFFLINE_IN_HOURS): if an agent is Offline during
+            # their hours, set DND so RingCentral stops routing calls to an
+            # unreachable seat. We never touch agents who are Available, already
+            # DND, or on a call.
             if within and not clear_dnd_in_hours:
-                left_alone += 1
-                log.info(
-                    "[%s] %s: within hours, not managed (open, %s; tz=%s)",
-                    ext_id, name, reason, tz_label,
-                )
+                if not dnd_offline_in_hours:
+                    left_alone += 1
+                    log.info(
+                        "[%s] %s: within hours, not managed (open, %s; tz=%s)",
+                        ext_id, name, reason, tz_label,
+                    )
+                    continue
+
+                presence = client.get_presence(ext_id)
+                presence_status = presence.get("presenceStatus")
+                telephony = presence.get("telephonyStatus")
+                current = presence.get("dndStatus")
+
+                # Only act on genuinely-offline agents who are not on a call.
+                on_a_call = telephony not in (None, "NoCall")
+                if presence_status != "Offline" or on_a_call:
+                    left_alone += 1
+                    log.info(
+                        "[%s] %s: within hours, not managed (open, presence=%s, "
+                        "telephony=%s; tz=%s)",
+                        ext_id, name, presence_status, telephony, tz_label,
+                    )
+                    continue
+
+                desired = dnd_when_closed
+                if current == desired:
+                    skipped += 1
+                    log.info(
+                        "[%s] %s: already %s (offline during hours; tz=%s)",
+                        ext_id, name, desired, tz_label,
+                    )
+                    continue
+                if dry_run:
+                    log.info(
+                        "[%s] %s: WOULD set %s -> %s (OFFLINE during hours; "
+                        "tz=%s) [dry-run]",
+                        ext_id, name, current, desired, tz_label,
+                    )
+                else:
+                    client.set_dnd_status(ext_id, desired)
+                    changed += 1
+                    log.info(
+                        "[%s] %s: set %s -> %s (OFFLINE during hours; tz=%s)",
+                        ext_id, name, current, desired, tz_label,
+                    )
                 continue
 
             desired = dnd_when_open if within else dnd_when_closed
