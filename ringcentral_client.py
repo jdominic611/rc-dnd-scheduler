@@ -168,6 +168,34 @@ class RingCentralClient:
             "GET", f"/restapi/v1.0/account/~/extension/{extension_id}"
         )
 
+    def list_call_queues(self, per_page: int = 1000) -> list:
+        """Return all call queues (Department extensions) across pages."""
+        out = []
+        path = "/restapi/v1.0/account/~/call-queues"
+        params = {"perPage": per_page}
+        while True:
+            data = self._request("GET", path, params=params)
+            out.extend(data.get("records", []))
+            next_uri = (data.get("navigation", {}) or {}).get("nextPage", {}).get("uri")
+            if not next_uri:
+                break
+            path, params = next_uri, None
+        return out
+
+    def get_queue_members(self, queue_id: str, per_page: int = 1000) -> list:
+        """Return member records ({id, extensionNumber}) for one call queue."""
+        out = []
+        path = f"/restapi/v1.0/account/~/department/{queue_id}/members"
+        params = {"perPage": per_page}
+        while True:
+            data = self._request("GET", path, params=params)
+            out.extend(data.get("records", []))
+            next_uri = (data.get("navigation", {}) or {}).get("nextPage", {}).get("uri")
+            if not next_uri:
+                break
+            path, params = next_uri, None
+        return out
+
     def get_presence(self, extension_id: str) -> Dict[str, Any]:
         return self._request(
             "GET", f"/restapi/v1.0/account/~/extension/{extension_id}/presence"

@@ -1,23 +1,20 @@
-# Render Blueprint — deploys this repo as a scheduled Cron Job.
-# Docs: https://render.com/docs/cronjobs and https://render.com/docs/blueprint-spec
+# Render Blueprint — deploys this repo as an always-on Background Worker.
+# Docs: https://render.com/docs/background-workers and https://render.com/docs/blueprint-spec
 #
-# After connecting the repo in Render (New > Blueprint), Render reads this file.
-# Set the secret env vars (marked sync:false) in the Render dashboard or via a
-# secret file — do NOT commit real secrets.
+# A worker (not a cron job) is used so the discovered agent list can be held in
+# memory and reused across cycles, with the call-queue fetch happening ~once a
+# day instead of every cycle.
 
 services:
-  - type: cron
+  - type: worker
     name: rc-dnd-scheduler
     runtime: python
-    plan: starter            # cron jobs require a paid instance type
-    # Run every 15 minutes. Adjust cadence to your desired flip precision.
-    # (cron expressions are interpreted in UTC on Render)
-    schedule: "*/15 * * * *"
+    plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
     envVars:
       - key: RC_SERVER_URL
-        value: https://platform.ringcentral.com   # sandbox: https://platform.devtest.ringcentral.com
+        value: https://platform.ringcentral.com
       - key: RC_CLIENT_ID
         sync: false
       - key: RC_CLIENT_SECRET
@@ -25,11 +22,19 @@ services:
       - key: RC_JWT
         sync: false
       - key: DEFAULT_TIMEZONE
-        value: America/Los_Angeles
+        value: America/New_York
       - key: DND_WHEN_CLOSED
         value: DoNotAcceptAnyCalls
-      - key: DND_WHEN_OPEN
-        value: TakeAllCalls
+      - key: DND_OFFLINE_IN_HOURS
+        value: "true"
+      - key: DISCOVER_AGENTS_FROM_QUEUES
+        value: "true"
+      - key: EXCLUDE_EXTENSION_IDS
+        value: "576045052"
+      - key: LOOP_INTERVAL_MINUTES
+        value: "5"
+      - key: AGENT_REFRESH_HOUR
+        value: "8"
       - key: DRY_RUN
         value: "false"
       - key: LOG_LEVEL
